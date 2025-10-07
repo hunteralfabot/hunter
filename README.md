@@ -3893,6 +3893,7 @@ try {
                 currentPrice: entryPrice,
                 exitPrice: null,
                 amount: usdtAmount,
+                totalInvestment: usdtAmount, // Initialize total investment
                 leverage: leverage,
                 stopLoss: stopLoss,
                 takeProfit: takeProfit,
@@ -5240,6 +5241,7 @@ try {
                 stopLossPercent: stopLossPercent, // TP/SL oranlarını sakla
                 takeProfitPercent: takeProfitPercent, // TP/SL oranlarını sakla
                 amount: usdtAmount,
+                totalInvestment: usdtAmount, // Initialize total investment
                 leverage: leverage,
                 pnl: 0,
                 status: 'Aktif',
@@ -5375,6 +5377,7 @@ try {
                 stopLossPercent: stopLossPercent, // TP/SL oranlarını sakla
                 takeProfitPercent: takeProfitPercent, // TP/SL oranlarını sakla
                 amount: usdtAmount,
+                totalInvestment: usdtAmount, // Initialize total investment
                 leverage: leverage,
                 pnl: 0,
                 status: 'Aktif',
@@ -7600,11 +7603,9 @@ try {
                 const symbolInfo = await getBybitSymbolInfo(trade.coin + 'USDT', apiKey, secretKey);
                 
                 // Calculate and send DCA orders for each level
-                let totalAmount = trade.amount; // Ana emir miktarı
                 for (let level = 1; level <= trade.dcaCount; level++) {
-                    // DCA hesaplama: önceki toplamın 1.2 katı
-                    const dcaAmount = totalAmount * 1.2;
-                    totalAmount += dcaAmount; // Toplam miktarı güncelle
+                    // DCA hesaplama: sabit çarpan ile hesaplama
+                    const dcaAmount = trade.amount * Math.pow(trade.dcaMultiplier || 1.5, level);
                     
                     // Calculate trigger price based on position type
                     let triggerPrice;
@@ -7686,7 +7687,7 @@ try {
                     positionIdx: 0
                 };
                 
-                addApiLog(`📊 DCA Seviye ${level} hesaplama: ${dcaAmount.toFixed(2)} USDT × ${trade.leverage}x ÷ ${triggerPrice.toFixed(6)} = ${quantity} ${trade.coin}`);
+                addApiLog(`📊 DCA Seviye ${level} hesaplama: ${dcaAmount.toFixed(2)} USDT × ${trade.leverage}x ÷ ${triggerPrice.toFixed(6)} = ${quantity} ${trade.coin} (Çarpan: ${trade.dcaMultiplier || 1.5}^${level})`);
                 
                 // Send DCA order to Bybit
                 const timestamp = Date.now().toString();
@@ -8186,7 +8187,9 @@ try {
                         const dcaAmount = trade.amount * Math.pow(dcaMultiplier, newDcaLevel);
                         const originalAmount = trade.amount;
                         
-                        trade.amount += dcaAmount;
+                        // Update total investment amount (not trade.amount)
+                        if (!trade.totalInvestment) trade.totalInvestment = trade.amount;
+                        trade.totalInvestment += dcaAmount;
                         trade.dcaLevel = newDcaLevel;
                         
                         // Recalculate average entry price
@@ -8359,7 +8362,7 @@ try {
                     });
                 }
                 
-                addApiLog(`✅ ${trade.coin} için ${trade.dcaCount} DCA emri hazırlandı (fiyat tetiklendiğinde gönderilecek)`);
+                addApiLog(`✅ ${trade.coin} için ${trade.dcaCount} DCA emri hazırlandı (Çarpan: ${trade.dcaMultiplier || 1.5}x, fiyat tetiklendiğinde gönderilecek)`);
                 
             } catch (error) {
                 addApiLog(`❌ DCA emirleri hazırlanırken hata: ${error.message}`);
@@ -8940,12 +8943,13 @@ try {
                 
                 // Calculate unrealized P&L using correct futures formula
                 let unrealizedPnL;
+                const investmentAmount = trade.totalInvestment || trade.amount;
                 if (trade.type === 'LONG') {
                     const priceChange = (currentPrice - trade.entryPrice) / trade.entryPrice;
-                    unrealizedPnL = trade.amount * priceChange * trade.leverage;
+                    unrealizedPnL = investmentAmount * priceChange * trade.leverage;
                 } else { // SHORT
                     const priceChange = (trade.entryPrice - currentPrice) / trade.entryPrice;
-                    unrealizedPnL = trade.amount * priceChange * trade.leverage;
+                    unrealizedPnL = investmentAmount * priceChange * trade.leverage;
                 }
                 
                 const row = document.createElement('tr');
@@ -8972,7 +8976,7 @@ try {
                         <span class="${typeBg} px-2 py-1 rounded text-xs font-bold text-white">${trade.type}</span>
                     </td>
                     <td class="p-2 border-r border-gray-600">
-                        <div class="text-white font-mono text-sm">$${trade.amount.toFixed(0)}</div>
+                        <div class="text-white font-mono text-sm">$${(trade.totalInvestment || trade.amount).toFixed(2)}</div>
                         <div class="text-xs text-gray-400">${trade.leverage}x</div>
                     </td>
                     <td class="p-2 font-mono text-white border-r border-gray-600 text-sm">$${trade.entryPrice.toFixed(decimalPlaces)}</td>
@@ -9442,6 +9446,7 @@ try {
                 stopLossPercent: stopLossPercent, // TP/SL oranlarını sakla
                 takeProfitPercent: takeProfitPercent, // TP/SL oranlarını sakla
                 amount: usdtAmount,
+                totalInvestment: usdtAmount, // Initialize total investment
                 leverage: leverage,
                 pnl: 0,
                 status: 'Aktif',
@@ -10390,12 +10395,10 @@ try {
       for(const fn of placeFns){
         if(window[fn] && typeof window[fn] === 'function'){
           // send limit DCA orders as best-effort
-          let totalAmount = baseSize; // Ana emir miktarı (1 USDT)
           for(let i=1;i<=levels;i++){
-            // DCA hesaplama: önceki toplamın 1.2 katı
-            const dcaAmount = totalAmount * 1.2; // Her DCA seviyesi için 1.2x
+            // DCA hesaplama: sabit çarpan ile hesaplama
+            const dcaAmount = baseSize * Math.pow(1.5, i); // Her DCA seviyesi için sabit çarpan
             const size = dcaAmount * 10; // 10x çarpanı
-            totalAmount = totalAmount + dcaAmount; // Toplam miktarı güncelle
             try{ await window[fn]({symbol, usdt:size, dcaLevel:i}); }catch(e){ /* ignore individual error */ }
           }
           console.log('DCA placed via', fn, symbol);
