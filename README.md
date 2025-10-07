@@ -7544,13 +7544,32 @@ try {
                     qty = qty.toFixed(3);
                 }
                 
+                // Validate SL price before sending order
+                const currentPrice = trade.currentPrice || trade.entryPrice;
+                let slPrice = trade.stopLoss;
+                
+                // Ensure SL price is valid for position type
+                if (trade.type === 'LONG') {
+                    // LONG: SL must be below current price
+                    if (slPrice >= currentPrice) {
+                        slPrice = currentPrice * 0.95; // 5% below current price
+                        addApiLog(`⚠️ LONG SL fiyatı düzeltildi: ${trade.stopLoss.toFixed(6)} → ${slPrice.toFixed(6)}`);
+                    }
+                } else {
+                    // SHORT: SL must be above current price
+                    if (slPrice <= currentPrice) {
+                        slPrice = currentPrice * 1.05; // 5% above current price
+                        addApiLog(`⚠️ SHORT SL fiyatı düzeltildi: ${trade.stopLoss.toFixed(6)} → ${slPrice.toFixed(6)}`);
+                    }
+                }
+                
                 const slOrderData = {
                     category: "linear",
                     symbol: symbol,
                     side: trade.type === 'LONG' ? 'Sell' : 'Buy',
                     orderType: 'Market',
                     qty: qty.toString(),
-                    triggerPrice: trade.stopLoss.toFixed(6),
+                    triggerPrice: slPrice.toFixed(6),
                     triggerDirection: trade.type === 'LONG' ? 2 : 1,
                     reduceOnly: true,
                     closeOnTrigger: true,
@@ -7775,13 +7794,32 @@ try {
                     qty = qty.toFixed(3);
                 }
                 
+                // Validate TP price before sending order
+                const currentPrice = trade.currentPrice || trade.entryPrice;
+                let tpPrice = trade.takeProfit;
+                
+                // Ensure TP price is valid for position type
+                if (trade.type === 'LONG') {
+                    // LONG: TP must be above current price
+                    if (tpPrice <= currentPrice) {
+                        tpPrice = currentPrice * 1.05; // 5% above current price
+                        addApiLog(`⚠️ LONG TP fiyatı düzeltildi: ${trade.takeProfit.toFixed(6)} → ${tpPrice.toFixed(6)}`);
+                    }
+                } else {
+                    // SHORT: TP must be below current price
+                    if (tpPrice >= currentPrice) {
+                        tpPrice = currentPrice * 0.95; // 5% below current price
+                        addApiLog(`⚠️ SHORT TP fiyatı düzeltildi: ${trade.takeProfit.toFixed(6)} → ${tpPrice.toFixed(6)}`);
+                    }
+                }
+                
                 const tpOrderData = {
                     category: "linear",
                     symbol: symbol,
                     side: trade.type === 'LONG' ? 'Sell' : 'Buy',
                     orderType: 'Market',
                     qty: qty.toString(),
-                    triggerPrice: trade.takeProfit.toFixed(6),
+                    triggerPrice: tpPrice.toFixed(6),
                     triggerDirection: trade.type === 'LONG' ? 1 : 2,
                     reduceOnly: true,
                     closeOnTrigger: true,
@@ -8201,12 +8239,29 @@ try {
                         const takeProfitPercent = trade.takeProfitPercent || 0.01; // Default 1% if not set
                         
                         // Correct TP/SL calculation based on position type using original percentages
+                        // Get current price for validation
+                        const currentPrice = trade.currentPrice || trade.entryPrice;
+                        
                         if (trade.type === 'LONG') {
-                            trade.stopLoss = trade.entryPrice * (1 - stopLossPercent);
-                            trade.takeProfit = trade.entryPrice * (1 + takeProfitPercent);
+                            // LONG: SL below entry, TP above entry
+                            const calculatedSL = trade.entryPrice * (1 - stopLossPercent);
+                            const calculatedTP = trade.entryPrice * (1 + takeProfitPercent);
+                            
+                            // Ensure SL is below current price for LONG
+                            trade.stopLoss = Math.min(calculatedSL, currentPrice * 0.95);
+                            trade.takeProfit = Math.max(calculatedTP, currentPrice * 1.05);
+                            
+                            addApiLog(`📊 LONG DCA TP/SL: Entry=${trade.entryPrice.toFixed(6)}, Current=${currentPrice.toFixed(6)}, SL=${trade.stopLoss.toFixed(6)}, TP=${trade.takeProfit.toFixed(6)}`);
                         } else { // SHORT
-                            trade.stopLoss = trade.entryPrice * (1 + stopLossPercent);
-                            trade.takeProfit = trade.entryPrice * (1 - takeProfitPercent);
+                            // SHORT: SL above entry, TP below entry
+                            const calculatedSL = trade.entryPrice * (1 + stopLossPercent);
+                            const calculatedTP = trade.entryPrice * (1 - takeProfitPercent);
+                            
+                            // Ensure SL is above current price for SHORT
+                            trade.stopLoss = Math.max(calculatedSL, currentPrice * 1.05);
+                            trade.takeProfit = Math.min(calculatedTP, currentPrice * 0.95);
+                            
+                            addApiLog(`📊 SHORT DCA TP/SL: Entry=${trade.entryPrice.toFixed(6)}, Current=${currentPrice.toFixed(6)}, SL=${trade.stopLoss.toFixed(6)}, TP=${trade.takeProfit.toFixed(6)}`);
                         }
                         
                         addApiLog(`📊 DCA sonrası TP/SL yeniden hesaplandı - SL: ${(stopLossPercent * 100).toFixed(2)}%, TP: ${(takeProfitPercent * 100).toFixed(2)}%`);
