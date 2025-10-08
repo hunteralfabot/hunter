@@ -1188,6 +1188,45 @@
                     <div id="webhookStatus" class="mt-4"></div>
                 </div>
 
+                <!-- Position Monitoring Control Panel -->
+                <div class="mt-6 bg-gray-800 rounded-xl p-6">
+                    <h3 class="text-xl font-bold mb-4 text-cyan-400">🔍 Pozisyon İzleme Sistemi (DCA Algılama)</h3>
+                    <div class="bg-gradient-to-r from-green-900/30 to-cyan-900/30 border border-green-600/50 rounded-lg p-4 mb-4">
+                        <div class="flex items-center mb-2">
+                            <span class="text-green-400 text-lg mr-2">✅</span>
+                            <p class="text-sm font-bold text-green-300">
+                                OTOMATİK BAŞLATMA AKTİF - Sayfa açıldığında 3 saniye sonra otomatik başlar
+                            </p>
+                        </div>
+                        <p class="text-sm text-gray-300 mb-2">
+                            Bu sistem, borsada gerçekleşen DCA alımlarını otomatik olarak algılar ve TP/SL emirlerini yeniden hesaplayarak günceller.
+                        </p>
+                        <ul class="text-xs text-gray-400 space-y-1 ml-4 list-disc">
+                            <li><strong>Her 5 saniyede</strong> bir aktif pozisyonlar kontrol edilir</li>
+                            <li>Pozisyon boyutu artışı algılandığında DCA tetiklenmiş sayılır</li>
+                            <li>Eski TP/SL emirleri iptal edilir, yenileri borsaya gönderilir</li>
+                            <li>Ortalama giriş fiyatı otomatik güncellenir</li>
+                        </ul>
+                    </div>
+                    <div class="flex space-x-4 items-center">
+                        <span id="monitoringStatus" class="px-4 py-2 bg-yellow-900 border border-yellow-600 rounded-lg text-sm flex items-center text-yellow-300">
+                            <span class="inline-block w-2 h-2 rounded-full bg-yellow-500 mr-2 animate-pulse"></span>
+                            Sistem Durumu: Başlatılıyor...
+                        </span>
+                        <div class="flex space-x-2">
+                            <button onclick="startPositionMonitoring()" class="bg-green-600 hover:bg-green-700 px-4 py-2 rounded-lg transition-colors text-sm font-medium">
+                                🔄 Yeniden Başlat
+                            </button>
+                            <button onclick="stopPositionMonitoring()" class="bg-red-600 hover:bg-red-700 px-4 py-2 rounded-lg transition-colors text-sm font-medium">
+                                ⏸️ Duraklat
+                            </button>
+                        </div>
+                    </div>
+                    <div class="mt-3 text-xs text-gray-500">
+                        💡 Not: Sistem otomatik çalışır. Butonlar sadece gerektiğinde manuel kontrol için kullanılır.
+                    </div>
+                </div>
+
                 <!-- API Logs -->
                 <div class="mt-6 bg-gray-800 rounded-xl p-6">
                     <h3 class="text-xl font-bold mb-4 text-cyan-400">📋 API İşlem Logları</h3>
@@ -3910,7 +3949,8 @@ try {
                 dcaLevel: 0,
                 dcaCount: dcaCount,
                 dcaTrigger: dcaTrigger,
-                dcaMultiplier: dcaMultiplier
+                dcaMultiplier: dcaMultiplier,
+                expectedPositionSize: (usdtAmount * leverage) / entryPrice // İlk pozisyon boyutu
             };
             
             // Add to transactions
@@ -5255,7 +5295,8 @@ try {
                 dcaLevel: 0,
                 dcaCount: dcaCount,
                 dcaTrigger: dcaTrigger,
-                dcaMultiplier: dcaMultiplier
+                dcaMultiplier: dcaMultiplier,
+                expectedPositionSize: (usdtAmount * leverage) / entryPrice // İlk pozisyon boyutu
             };
             
             transactions.unshift(trade);
@@ -5391,7 +5432,8 @@ try {
                 dcaLevel: 0,
                 dcaCount: dcaCount,
                 dcaTrigger: dcaTrigger,
-                dcaMultiplier: dcaMultiplier
+                dcaMultiplier: dcaMultiplier,
+                expectedPositionSize: (usdtAmount * leverage) / entryPrice // İlk pozisyon boyutu
             };
             
             transactions.unshift(trade);
@@ -7968,6 +8010,307 @@ try {
             }
         }
 
+        // Get detailed position information from Bybit
+        async function getBybitPositionDetails(symbol, apiKey, secretKey) {
+            try {
+                const timestamp = Date.now().toString();
+                const recvWindow = '5000';
+                const queryString = `category=linear&symbol=${symbol}`;
+                const signature = await createBybitSignature(apiKey, secretKey, timestamp, recvWindow, queryString);
+                
+                const response = await fetch(`https://api.bybit.com/v5/position/list?${queryString}`, {
+                    method: 'GET',
+                    headers: {
+                        'X-BAPI-API-KEY': apiKey,
+                        'X-BAPI-SIGN': signature,
+                        'X-BAPI-SIGN-TYPE': '2',
+                        'X-BAPI-TIMESTAMP': timestamp,
+                        'X-BAPI-RECV-WINDOW': recvWindow
+                    }
+                });
+                
+                const result = await response.json();
+                
+                if (result.retCode === 0 && result.result.list && result.result.list.length > 0) {
+                    const position = result.result.list[0];
+                    return {
+                        size: parseFloat(position.size),
+                        side: position.side,
+                        avgPrice: parseFloat(position.avgPrice),
+                        leverage: parseFloat(position.leverage),
+                        positionValue: parseFloat(position.positionValue),
+                        unrealisedPnl: parseFloat(position.unrealisedPnl),
+                        markPrice: parseFloat(position.markPrice)
+                    };
+                }
+                return null;
+            } catch (error) {
+                console.error('Position details error:', error);
+                return null;
+            }
+        }
+
+        // Monitor DCA execution AND position closure on exchange
+        async function monitorDCAExecutionOnExchange(trade) {
+            try {
+                const apiKey = document.getElementById('bybitApiKey').value;
+                const secretKey = document.getElementById('bybitSecretKey').value;
+                
+                if (!apiKey || !secretKey) {
+                    console.log('API keys not found, skipping monitoring');
+                    return;
+                }
+                
+                // Get current position details from exchange
+                const symbol = trade.coin + 'USDT';
+                const positionDetails = await getBybitPositionDetails(symbol, apiKey, secretKey);
+                
+                if (!positionDetails) {
+                    console.log(`No position details for ${symbol}`);
+                    return;
+                }
+                
+                // CHECK 1: Position closed (TP/SL hit)
+                if (positionDetails.size === 0) {
+                    addApiLog(`🎯 ${symbol} pozisyonu borsada kapandı! TP/SL tetiklenmiş olabilir.`);
+                    
+                    // Check if trade is still active in our system
+                    if (trade.status === 'Aktif' || trade.status === 'active') {
+                        addApiLog(`🔄 ${symbol} işlemi yerel sistemde kapatılıyor...`);
+                        
+                        // Close the trade
+                        await completeTrade(trade.id, false);
+                        
+                        addApiLog(`✅ ${symbol} işlemi başarıyla kapatıldı`);
+                        showNotification(`${trade.coin} pozisyonu borsada kapandı ve sistem güncellendi!`, 'success');
+                    }
+                    return; // No need to check DCA if position is closed
+                }
+                
+                // CHECK 2: DCA execution (only if DCA is enabled)
+                if (!trade.dcaEnabled || !trade.dcaCount || trade.dcaLevel >= trade.dcaCount) {
+                    // No DCA to check, skip
+                    return;
+                }
+                
+                // Initialize expected position size if not set
+                if (!trade.expectedPositionSize) {
+                    // Calculate initial position size based on amount and leverage
+                    trade.expectedPositionSize = (trade.amount * trade.leverage) / trade.entryPrice;
+                    console.log(`${symbol} - İlk pozisyon boyutu ayarlandı: ${trade.expectedPositionSize.toFixed(4)}`);
+                    // Save the initial size
+                    saveTransactionsToStorage();
+                }
+                
+                // Debug log
+                console.log(`${symbol} - Beklenen: ${trade.expectedPositionSize.toFixed(4)}, Mevcut: ${positionDetails.size.toFixed(4)}, Fark: ${(positionDetails.size - trade.expectedPositionSize).toFixed(4)}`);
+                
+                // Check if position size has increased (DCA triggered)
+                const sizeDifference = positionDetails.size - trade.expectedPositionSize;
+                const sizeThreshold = trade.expectedPositionSize * 0.05; // 5% threshold (daha hassas)
+                
+                if (sizeDifference > sizeThreshold) {
+                    addApiLog(`🎯 DCA tetiklendi! Pozisyon boyutu arttı: ${trade.expectedPositionSize.toFixed(4)} → ${positionDetails.size.toFixed(4)}`);
+                    addApiLog(`📊 Fark: ${sizeDifference.toFixed(4)}, Eşik: ${sizeThreshold.toFixed(4)}`);
+                    
+                    // DCA was executed on exchange, update trade data
+                    const oldAvgPrice = trade.entryPrice;
+                    const newAvgPrice = positionDetails.avgPrice;
+                    
+                    addApiLog(`📊 Ortalama fiyat güncelleniyor: ${oldAvgPrice.toFixed(6)} → ${newAvgPrice.toFixed(6)}`);
+                    
+                    // Update trade with new average entry price
+                    trade.entryPrice = newAvgPrice;
+                    trade.expectedPositionSize = positionDetails.size;
+                    
+                    // Increment DCA level
+                    if (!trade.dcaLevel) trade.dcaLevel = 0;
+                    trade.dcaLevel++;
+                    
+                    addApiLog(`🔢 DCA Seviye: ${trade.dcaLevel}/${trade.dcaCount}`);
+                    
+                    // Use the ACTUAL current price from position after DCA
+                    const currentMarketPrice = positionDetails.markPrice;
+                    addApiLog(`📊 DCA sonrası mevcut fiyat: ${currentMarketPrice.toFixed(6)}`);
+                    addApiLog(`📊 Yeni ortalama entry: ${trade.entryPrice.toFixed(6)}`);
+                    
+                    // Recalculate TP/SL based on CURRENT PRICE (not average entry)
+                    const stopLossPercent = trade.stopLossPercent || 0.02;
+                    const takeProfitPercent = trade.takeProfitPercent || 0.01;
+                    
+                    // Calculate new TP/SL: TP from CURRENT price, SL from AVERAGE entry
+                    if (trade.type === 'LONG') {
+                        // LONG: TP above current price (easy to reach), SL below average entry (risk management)
+                        trade.takeProfit = currentMarketPrice * (1 + takeProfitPercent);
+                        trade.stopLoss = trade.entryPrice * (1 - stopLossPercent);
+                        
+                        addApiLog(`📊 LONG DCA - Yeni TP/SL hesaplandı:`);
+                        addApiLog(`   Ortalama Entry: ${trade.entryPrice.toFixed(6)}`);
+                        addApiLog(`   Mevcut Fiyat: ${currentMarketPrice.toFixed(6)}`);
+                        addApiLog(`   TP: ${trade.takeProfit.toFixed(6)} (mevcut fiyattan %${(takeProfitPercent * 100).toFixed(2)} yukarı - YAKIN!)`);
+                        addApiLog(`   SL: ${trade.stopLoss.toFixed(6)} (ortalama entry'den %${(stopLossPercent * 100).toFixed(2)} aşağı)`);
+                    } else {
+                        // SHORT: TP below current price (easy to reach), SL above average entry (risk management)
+                        trade.takeProfit = currentMarketPrice * (1 - takeProfitPercent);
+                        trade.stopLoss = trade.entryPrice * (1 + stopLossPercent);
+                        
+                        addApiLog(`📊 SHORT DCA - Yeni TP/SL hesaplandı:`);
+                        addApiLog(`   Ortalama Entry: ${trade.entryPrice.toFixed(6)}`);
+                        addApiLog(`   Mevcut Fiyat: ${currentMarketPrice.toFixed(6)}`);
+                        addApiLog(`   TP: ${trade.takeProfit.toFixed(6)} (mevcut fiyattan %${(takeProfitPercent * 100).toFixed(2)} aşağı - YAKIN!)`);
+                        addApiLog(`   SL: ${trade.stopLoss.toFixed(6)} (ortalama entry'den %${(stopLossPercent * 100).toFixed(2)} yukarı)`);
+                    }
+                    
+                    // Cancel ONLY TP/SL orders (keep remaining DCA orders)
+                    addApiLog(`🔄 ${symbol} için sadece TP/SL emirleri iptal ediliyor...`);
+                    try {
+                        // Try to cancel by order IDs first
+                        if (trade.slOrderId) {
+                            try {
+                                await cancelBybitOrderById(trade.slOrderId, symbol);
+                                addApiLog(`✅ Eski SL emri iptal edildi (ID: ${trade.slOrderId})`);
+                            } catch (e) {
+                                addApiLog(`⚠️ Eski SL iptal edilemedi: ${e.message}`);
+                            }
+                            trade.slOrderId = null;
+                        }
+                        
+                        if (trade.tpOrderId) {
+                            try {
+                                await cancelBybitOrderById(trade.tpOrderId, symbol);
+                                addApiLog(`✅ Eski TP emri iptal edildi (ID: ${trade.tpOrderId})`);
+                            } catch (e) {
+                                addApiLog(`⚠️ Eski TP iptal edilemedi: ${e.message}`);
+                            }
+                            trade.tpOrderId = null;
+                        }
+                        
+                        addApiLog(`ℹ️ Kalan DCA emirleri borsada korundu`);
+                    } catch (error) {
+                        addApiLog(`⚠️ TP/SL iptal hatası: ${error.message}`);
+                        // Continue anyway
+                    }
+                    
+                    // Wait before sending new orders
+                    addApiLog(`⏳ 2 saniye bekleniyor...`);
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                    
+                    // Send new TP/SL orders to exchange
+                    addApiLog(`📤 Yeni TP/SL emirleri borsaya gönderiliyor...`);
+                    
+                    let slSuccess = false;
+                    let tpSuccess = false;
+                    
+                    // Send SL
+                    try {
+                        addApiLog(`📉 Stop Loss emri gönderiliyor: ${trade.stopLoss.toFixed(6)}`);
+                        await sendBybitStopLoss(trade, apiKey, secretKey);
+                        slSuccess = true;
+                        addApiLog(`✅ Stop Loss emri başarıyla gönderildi`);
+                    } catch (error) {
+                        addApiLog(`❌ Stop Loss hatası: ${error.message}`);
+                    }
+                    
+                    // Wait between orders
+                    await new Promise(resolve => setTimeout(resolve, 1500));
+                    
+                    // Send TP
+                    try {
+                        addApiLog(`📈 Take Profit emri gönderiliyor: ${trade.takeProfit.toFixed(6)}`);
+                        await sendBybitTakeProfit(trade, apiKey, secretKey);
+                        tpSuccess = true;
+                        addApiLog(`✅ Take Profit emri başarıyla gönderildi`);
+                    } catch (error) {
+                        addApiLog(`❌ Take Profit hatası: ${error.message}`);
+                    }
+                    
+                    if (slSuccess && tpSuccess) {
+                        addApiLog(`✅✅ Yeni TP/SL emirleri başarıyla borsaya gönderildi!`);
+                        
+                        const remainingDCALevels = trade.dcaCount - trade.dcaLevel;
+                        if (remainingDCALevels > 0) {
+                            addApiLog(`ℹ️ Kalan ${remainingDCALevels} DCA emri borsada bekliyor (değiştirilmedi)`);
+                        }
+                        
+                        showNotification(`${trade.coin} DCA ${trade.dcaLevel}: TP/SL güncellendi!`, 'success');
+                    } else {
+                        addApiLog(`⚠️ TP/SL emirlerinde sorun var - SL: ${slSuccess ? '✅' : '❌'}, TP: ${tpSuccess ? '✅' : '❌'}`);
+                        showNotification(`${trade.coin} DCA ${trade.dcaLevel}: TP/SL güncellemede sorun!`, 'warning');
+                    }
+                    
+                    // Save updated trade data
+                    saveTransactionsToStorage();
+                    updateActiveTradesTable();
+                    updateTradeInfo();
+                    
+                    addApiLog(`💾 Trade bilgileri kaydedildi ve güncellendi`);
+                }
+                
+            } catch (error) {
+                console.error('DCA monitoring error:', error);
+                addApiLog(`❌ DCA izleme hatası: ${error.message}`);
+            }
+        }
+
+        // Start position monitoring for all active trades
+        let positionMonitoringInterval = null;
+        
+        function startPositionMonitoring() {
+            // Clear existing interval if any
+            if (positionMonitoringInterval) {
+                clearInterval(positionMonitoringInterval);
+            }
+            
+            // Monitor positions every 5 seconds (DCA + TP/SL closure)
+            positionMonitoringInterval = setInterval(async () => {
+                // Monitor ALL active trades (not just DCA enabled)
+                const activeTrades = transactions.filter(t => 
+                    t.status === 'Aktif' || t.status === 'active'
+                );
+                
+                if (activeTrades.length === 0) {
+                    console.log('No active trades to monitor');
+                    return;
+                }
+                
+                console.log(`Monitoring ${activeTrades.length} active trade(s)...`);
+                
+                for (const trade of activeTrades) {
+                    await monitorDCAExecutionOnExchange(trade);
+                    // Small delay between trades to avoid rate limiting
+                    await new Promise(resolve => setTimeout(resolve, 300));
+                }
+            }, 5000); // Check every 5 seconds
+            
+            addApiLog(`✅ Pozisyon izleme sistemi başlatıldı (5 saniyede bir kontrol)`);
+            
+            // Update UI status
+            const statusEl = document.getElementById('monitoringStatus');
+            if (statusEl) {
+                statusEl.innerHTML = '<span class="inline-block w-2 h-2 rounded-full bg-green-500 mr-2 animate-pulse"></span>Sistem Durumu: Aktif';
+                statusEl.className = 'px-4 py-2 bg-green-900 border border-green-600 rounded-lg text-sm flex items-center text-green-300';
+            }
+            
+            showNotification('Pozisyon izleme sistemi başlatıldı', 'success');
+        }
+        
+        function stopPositionMonitoring() {
+            if (positionMonitoringInterval) {
+                clearInterval(positionMonitoringInterval);
+                positionMonitoringInterval = null;
+                addApiLog(`⏹️ Pozisyon izleme sistemi durduruldu`);
+                
+                // Update UI status
+                const statusEl = document.getElementById('monitoringStatus');
+                if (statusEl) {
+                    statusEl.innerHTML = '<span class="inline-block w-2 h-2 rounded-full bg-red-500 mr-2"></span>Sistem Durumu: Durduruldu';
+                    statusEl.className = 'px-4 py-2 bg-red-900 border border-red-600 rounded-lg text-sm flex items-center text-red-300';
+                }
+                
+                showNotification('Pozisyon izleme sistemi durduruldu', 'info');
+            }
+        }
+
         async function createBybitSignature(apiKey, secretKey, timestamp, recvWindow, jsonBody) {
             try {
                 // Correct Bybit v5 signature format: timestamp + apiKey + recvWindow + jsonBody
@@ -8165,25 +8508,48 @@ try {
         
         // Send new TP/SL orders after DCA
         async function sendNewTPSLOrders(trade) {
+            const apiKey = document.getElementById('bybitApiKey').value;
+            const secretKey = document.getElementById('bybitSecretKey').value;
+            
+            if (!apiKey || !secretKey) {
+                addApiLog(`⚠️ API anahtarları bulunamadı, TP/SL gönderilemedi`);
+                return;
+            }
+            
+            addApiLog(`📤 Yeni TP/SL emirleri gönderiliyor...`);
+            
+            let slSuccess = false;
+            let tpSuccess = false;
+            
+            // Send new Stop Loss order
             try {
-                const apiKey = document.getElementById('bybitApiKey').value;
-                const secretKey = document.getElementById('bybitSecretKey').value;
-                
-                if (apiKey && secretKey) {
-                    addApiLog(`📤 Yeni TP/SL emirleri gönderiliyor...`);
-                    
-                    // Send new Stop Loss order and wait for completion
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                    await sendBybitStopLoss(trade, apiKey, secretKey);
-                    
-                    // Send new Take Profit order and wait for completion
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                    await sendBybitTakeProfit(trade, apiKey, secretKey);
-                    
-                    addApiLog(`✅ Yeni TP/SL emirleri başarıyla gönderildi`);
-                }
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                addApiLog(`📉 Stop Loss emri gönderiliyor: ${trade.stopLoss.toFixed(6)}`);
+                await sendBybitStopLoss(trade, apiKey, secretKey);
+                slSuccess = true;
+                addApiLog(`✅ Stop Loss emri başarıyla gönderildi`);
             } catch (error) {
-                addApiLog(`❌ Yeni TP/SL emirleri gönderilirken hata: ${error.message}`);
+                addApiLog(`❌ Stop Loss hatası: ${error.message}`);
+            }
+            
+            // Send new Take Profit order
+            try {
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                addApiLog(`📈 Take Profit emri gönderiliyor: ${trade.takeProfit.toFixed(6)}`);
+                await sendBybitTakeProfit(trade, apiKey, secretKey);
+                tpSuccess = true;
+                addApiLog(`✅ Take Profit emri başarıyla gönderildi`);
+            } catch (error) {
+                addApiLog(`❌ Take Profit hatası: ${error.message}`);
+            }
+            
+            // Final status
+            if (slSuccess && tpSuccess) {
+                addApiLog(`✅✅ Yeni TP/SL emirleri başarıyla borsaya gönderildi!`);
+                showNotification(`${trade.coin} DCA: TP/SL başarıyla güncellendi!`, 'success');
+            } else {
+                addApiLog(`⚠️ TP/SL gönderiminde sorun - SL: ${slSuccess ? '✅' : '❌'}, TP: ${tpSuccess ? '✅' : '❌'}`);
+                showNotification(`${trade.coin} DCA: TP/SL güncellemede problem! SL:${slSuccess?'✓':'✗'} TP:${tpSuccess?'✓':'✗'}`, 'warning');
             }
         }
 
@@ -8234,34 +8600,33 @@ try {
                         const weightedPrice = (trade.entryPrice * originalAmount + dcaOrder.price * dcaAmount) / trade.amount;
                         trade.entryPrice = weightedPrice;
                         
-                        // Recalculate TP/SL based on new average price using original percentages
+                        // Recalculate TP/SL: TP from CURRENT price, SL from AVERAGE entry
                         const stopLossPercent = trade.stopLossPercent || 0.02; // Default 2% if not set
                         const takeProfitPercent = trade.takeProfitPercent || 0.01; // Default 1% if not set
                         
-                        // Correct TP/SL calculation based on position type using original percentages
-                        // Get current price for validation
-                        const currentPrice = trade.currentPrice || trade.entryPrice;
+                        addApiLog(`📊 DCA sonrası mevcut fiyat: ${currentPrice.toFixed(6)}`);
+                        addApiLog(`📊 Yeni ortalama entry: ${trade.entryPrice.toFixed(6)}`);
                         
                         if (trade.type === 'LONG') {
-                            // LONG: SL below entry, TP above entry
-                            const calculatedSL = trade.entryPrice * (1 - stopLossPercent);
-                            const calculatedTP = trade.entryPrice * (1 + takeProfitPercent);
+                            // LONG: TP above current price (easy to reach), SL below average entry (risk management)
+                            trade.takeProfit = currentPrice * (1 + takeProfitPercent);
+                            trade.stopLoss = trade.entryPrice * (1 - stopLossPercent);
                             
-                            // Ensure SL is below current price for LONG
-                            trade.stopLoss = Math.min(calculatedSL, currentPrice * 0.95);
-                            trade.takeProfit = Math.max(calculatedTP, currentPrice * 1.05);
-                            
-                            addApiLog(`📊 LONG DCA TP/SL: Entry=${trade.entryPrice.toFixed(6)}, Current=${currentPrice.toFixed(6)}, SL=${trade.stopLoss.toFixed(6)}, TP=${trade.takeProfit.toFixed(6)}`);
+                            addApiLog(`📊 LONG DCA TP/SL:`);
+                            addApiLog(`   Ortalama Entry: ${trade.entryPrice.toFixed(6)}`);
+                            addApiLog(`   Mevcut Fiyat: ${currentPrice.toFixed(6)}`);
+                            addApiLog(`   TP: ${trade.takeProfit.toFixed(6)} (mevcut fiyattan %${(takeProfitPercent * 100).toFixed(2)} yukarı - YAKIN!)`);
+                            addApiLog(`   SL: ${trade.stopLoss.toFixed(6)} (ortalama entry'den %${(stopLossPercent * 100).toFixed(2)} aşağı)`);
                         } else { // SHORT
-                            // SHORT: SL above entry, TP below entry
-                            const calculatedSL = trade.entryPrice * (1 + stopLossPercent);
-                            const calculatedTP = trade.entryPrice * (1 - takeProfitPercent);
+                            // SHORT: TP below current price (easy to reach), SL above average entry (risk management)
+                            trade.takeProfit = currentPrice * (1 - takeProfitPercent);
+                            trade.stopLoss = trade.entryPrice * (1 + stopLossPercent);
                             
-                            // Ensure SL is above current price for SHORT
-                            trade.stopLoss = Math.max(calculatedSL, currentPrice * 1.05);
-                            trade.takeProfit = Math.min(calculatedTP, currentPrice * 0.95);
-                            
-                            addApiLog(`📊 SHORT DCA TP/SL: Entry=${trade.entryPrice.toFixed(6)}, Current=${currentPrice.toFixed(6)}, SL=${trade.stopLoss.toFixed(6)}, TP=${trade.takeProfit.toFixed(6)}`);
+                            addApiLog(`📊 SHORT DCA TP/SL:`);
+                            addApiLog(`   Ortalama Entry: ${trade.entryPrice.toFixed(6)}`);
+                            addApiLog(`   Mevcut Fiyat: ${currentPrice.toFixed(6)}`);
+                            addApiLog(`   TP: ${trade.takeProfit.toFixed(6)} (mevcut fiyattan %${(takeProfitPercent * 100).toFixed(2)} aşağı - YAKIN!)`);
+                            addApiLog(`   SL: ${trade.stopLoss.toFixed(6)} (ortalama entry'den %${(stopLossPercent * 100).toFixed(2)} yukarı)`);
                         }
                         
                         addApiLog(`📊 DCA sonrası TP/SL yeniden hesaplandı - SL: ${(stopLossPercent * 100).toFixed(2)}%, TP: ${(takeProfitPercent * 100).toFixed(2)}%`);
@@ -9515,7 +9880,8 @@ try {
                 dcaLevel: 0,
                 dcaCount: dcaCount,
                 dcaTrigger: dcaTrigger,
-                dcaMultiplier: dcaMultiplier
+                dcaMultiplier: dcaMultiplier,
+                expectedPositionSize: (usdtAmount * leverage) / entryPrice // İlk pozisyon boyutu
             };
             
             transactions.unshift(trade);
@@ -10381,6 +10747,25 @@ try {
             loadSettings();
             // Load ProBot AI settings
             loadProbotSettings();
+            
+            // Start position monitoring for DCA execution detection (AUTOMATIC)
+            // Use longer delay and ensure functions are ready
+            setTimeout(() => {
+                try {
+                    if (typeof startPositionMonitoring === 'function') {
+                        addApiLog(`🔄 Pozisyon izleme sistemi otomatik başlatılıyor...`);
+                        startPositionMonitoring();
+                        addApiLog(`✅ Pozisyon izleme sistemi otomatik olarak başlatıldı!`);
+                        addApiLog(`📊 DCA ve TP/SL algılama aktif - Her 5 saniyede bir kontrol edilecek`);
+                        showNotification('🔍 Pozisyon izleme sistemi otomatik başlatıldı! DCA alımları ve TP/SL kapanışları algılanacak.', 'success', 8000);
+                        console.log('✅ Position monitoring started automatically');
+                    } else {
+                        console.error('❌ startPositionMonitoring function not found');
+                    }
+                } catch (error) {
+                    console.error('❌ Position monitoring auto-start failed:', error);
+                }
+            }, 5000); // Wait 5 seconds to ensure all functions are loaded
             
             // Auto-save settings when changed
             const settingsInputs = [
