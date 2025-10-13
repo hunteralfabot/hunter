@@ -2181,28 +2181,48 @@
 try {
     const savedSession = localStorage.getItem('ct_session') || localStorage.getItem('session');
     if (savedSession) {
+        console.log('🔐 Session found in localStorage, restoring...');
         currentUser = JSON.parse(savedSession);
+        console.log('👤 User:', currentUser.username || currentUser.user || 'Unknown');
+        
         // Reveal main app UI if present
         if (document.getElementById('authPage')) document.getElementById('authPage').classList.add('hidden');
         if (document.getElementById('mainApp')) document.getElementById('mainApp').classList.remove('hidden');
         if (document.getElementById('userName')) document.getElementById('userName').textContent = currentUser.username || currentUser.user || '';
+        
         // Restore saved API keys into inputs (if present)
         try {
             const bk = JSON.parse(localStorage.getItem('binance_keys') || 'null');
             if (bk && document.getElementById('binanceApiKey')) { document.getElementById('binanceApiKey').value = bk.apiKey || bk.key || ''; if(document.getElementById('binanceSecretKey')) document.getElementById('binanceSecretKey').value = bk.secret || bk.secretKey || ''; }
             const by = JSON.parse(localStorage.getItem('bybit_keys') || 'null');
             if (by && document.getElementById('bybitApiKey')) { document.getElementById('bybitApiKey').value = by.apiKey || by.key || ''; if(document.getElementById('bybitSecretKey')) document.getElementById('bybitSecretKey').value = by.secret || by.secretKey || ''; }
+            console.log('🔑 API keys restored');
         } catch(e){ console.warn('restore API keys error', e); }
+        
         // Restore transactions from localStorage
         try {
             const savedTransactions = localStorage.getItem('ct_transactions');
             if (savedTransactions) {
                 transactions = JSON.parse(savedTransactions);
-                console.log('Transactions restored from storage:', transactions.length);
+                console.log('📊 Transactions restored from storage:', transactions.length);
             }
         } catch(e){ console.warn('restore transactions error', e); }
+        
         // Initialize app state after brief delay to allow DOM ready
-        setTimeout(()=>{ try{ if(typeof initializeApp === 'function'){ initializeApp(); } }catch(e){} }, 200);
+        console.log('⏳ Initializing app in 200ms...');
+        setTimeout(()=>{ 
+            try{ 
+                if(typeof initializeApp === 'function'){ 
+                    initializeApp(); 
+                } else {
+                    console.error('❌ initializeApp function not found!');
+                }
+            }catch(e){ 
+                console.error('❌ App initialization error:', e); 
+            } 
+        }, 200);
+    } else {
+        console.log('ℹ️ No saved session found, showing login page');
     }
 } catch(e) { console.warn('session restore patch error', e); }
 // --- SESSION PERSISTENCE PATCH END ---
@@ -2230,6 +2250,38 @@ try {
         let fastAiOpportunities = 0;
         let longAiOpportunities = 0;
         let probotAiOpportunities = 0;
+        
+        // API Rate Limit Protection System
+        let apiRequestQueue = [];
+        let apiRequestCount = 0;
+        let apiRequestWindow = Date.now();
+        const API_MAX_REQUESTS_PER_SECOND = 8; // Conservative limit (Bybit allows 10)
+        const API_REQUEST_WINDOW = 1000; // 1 second
+        
+        // Trade Opening Cooldown System (prevent simultaneous trades)
+        let lastTradeOpenTime = 0;
+        const TRADE_OPEN_COOLDOWN = 2000; // 2 seconds between trades
+        
+        async function rateLimitedApiCall(apiFunction, ...args) {
+            // Reset counter if window has passed
+            if (Date.now() - apiRequestWindow > API_REQUEST_WINDOW) {
+                apiRequestCount = 0;
+                apiRequestWindow = Date.now();
+            }
+            
+            // If limit reached, wait for next window
+            if (apiRequestCount >= API_MAX_REQUESTS_PER_SECOND) {
+                const waitTime = API_REQUEST_WINDOW - (Date.now() - apiRequestWindow);
+                addApiLog(`⏳ API rate limit - ${waitTime}ms bekleniyor...`);
+                await new Promise(resolve => setTimeout(resolve, waitTime + 100));
+                apiRequestCount = 0;
+                apiRequestWindow = Date.now();
+            }
+            
+            // Execute the API call
+            apiRequestCount++;
+            return await apiFunction(...args);
+        }
         
         // Logging functions
         function addFastAiLog(message, type = 'info') {
@@ -2462,11 +2514,17 @@ try {
             const password = document.getElementById('loginPassword').value;
             
             if (username === 'Hunter3535' && password === '510400') {
+                console.log('✅ Login successful for user:', username);
                 currentUser = {
                     username: username,
                     loginTime: new Date()
                 };
-                try{ localStorage.setItem('ct_session', JSON.stringify(currentUser)); }catch(e){}
+                try{ 
+                    localStorage.setItem('ct_session', JSON.stringify(currentUser)); 
+                    console.log('💾 Session saved to localStorage');
+                }catch(e){
+                    console.error('❌ Failed to save session:', e);
+                }
                 
                 
                 document.getElementById('authPage').classList.add('hidden');
@@ -2474,8 +2532,10 @@ try {
                 document.getElementById('userName').textContent = username;
                 
                 showNotification('Giriş başarılı! Hoş geldiniz ' + username, 'success');
+                console.log('🚀 Initializing app after login...');
                 initializeApp();
             } else {
+                console.warn('❌ Login failed: Invalid credentials');
                 showNotification('Kullanıcı adı veya şifre hatalı!', 'error');
             }
         }
@@ -2569,12 +2629,32 @@ try {
             isAdmin = false;
             document.getElementById('authPage').classList.remove('hidden');
             document.getElementById('mainApp').classList.add('hidden');
-            clearInterval(priceUpdateInterval);
+            
+            // Clear all intervals
+            if (priceUpdateInterval) {
+                clearInterval(priceUpdateInterval);
+                priceUpdateInterval = null;
+                console.log('🔄 Price update interval stopped on logout');
+            }
+            if (positionMonitoringInterval) {
+                clearInterval(positionMonitoringInterval);
+                positionMonitoringInterval = null;
+                console.log('🔄 Position monitoring interval stopped on logout');
+            }
+            
+            // Clear session from localStorage
+            try {
+                localStorage.removeItem('ct_session');
+            } catch(e) {}
+            
             showNotification('Çıkış yapıldı.', 'info');
         }
 
         // App Initialization
         function initializeApp() {
+            console.log('🚀 ========== INITIALIZING APP ==========');
+            console.log('📅 Time:', new Date().toLocaleString('tr-TR'));
+            
             // Load transactions from localStorage
             loadTransactionsFromStorage();
             
@@ -2591,6 +2671,10 @@ try {
             // Update trade displays after loading transactions
             updateActiveTradesTable();
             updateCompletedTradesTable();
+            
+            console.log('✅ App initialization completed');
+            console.log('🔄 Auto-monitoring systems will start shortly...');
+            console.log('========================================');
         }
 
         // Global variables for sorting
@@ -3497,6 +3581,12 @@ try {
 
         // Start real-time price updates (every 2 seconds for better accuracy)
         function startPriceUpdates() {
+            // Clear existing interval to prevent duplicates
+            if (priceUpdateInterval) {
+                clearInterval(priceUpdateInterval);
+                console.log('🔄 Cleared existing price update interval');
+            }
+            
             priceUpdateInterval = setInterval(() => {
                 // Always fetch real prices for accurate updates
                 fetchRealPrices();
@@ -3524,11 +3614,22 @@ try {
                 }
                 
             }, 2000); // Update every 2 seconds for better accuracy
+            
+            console.log('✅ Price update interval started (checks active trades every 2s)');
         }
         
         // Check active trades for SL/TP triggers
+        let tradeCheckCounter = 0;
         async function checkActiveTradesForExit() {
             const activeTrades = transactions.filter(t => t.status === 'Aktif');
+            
+            // Log every 30th check to avoid spam (30 * 2s = 60s = 1 minute)
+            tradeCheckCounter++;
+            if (tradeCheckCounter === 1 || tradeCheckCounter % 30 === 0) {
+                console.log(`🔍 Checking ${activeTrades.length} active trade(s) for SL/TP triggers... (check #${tradeCheckCounter})`);
+            }
+            
+            if (activeTrades.length === 0) return;
             
             for (const trade of activeTrades) {
                 const coin = cryptoData.find(c => c.symbol === trade.coin);
@@ -3849,6 +3950,14 @@ try {
             console.log('🤖 simulateProbotTrading called, probotAiActive:', probotAiActive);
             if (!probotAiActive) return;
             
+            // Check trade opening cooldown (prevent rapid-fire trades)
+            const timeSinceLastTrade = Date.now() - lastTradeOpenTime;
+            if (timeSinceLastTrade < TRADE_OPEN_COOLDOWN) {
+                const waitTime = TRADE_OPEN_COOLDOWN - timeSinceLastTrade;
+                addProbotLog(`⏳ İşlem cooldown - ${(waitTime/1000).toFixed(1)}s bekleniyor...`);
+                return;
+            }
+            
             // Check maximum active trades limit for ProBot AI
             if (!checkMaxActiveTrades('ProBot AI')) {
                 console.log('❌ ProBot AI max trades limit reached');
@@ -3955,6 +4064,10 @@ try {
             
             // Add to transactions
             transactions.unshift(trade);
+            
+            // Update last trade open time for cooldown protection
+            lastTradeOpenTime = Date.now();
+            addProbotLog(`⏱️ İşlem cooldown başlatıldı (${TRADE_OPEN_COOLDOWN/1000}s)`);
             
             // Save to storage and update UI (same as Fast AI and Long AI)
             saveTransactionsToStorage();
@@ -4977,9 +5090,9 @@ try {
                 addFastAiLog(`🔍 Hızlı AI market taraması - uygun fırsat bulunamadı`);
             }
             
-            // Schedule next analysis
+            // Schedule next analysis (increased to 15 seconds for stability)
             if (fastAiActive) {
-                setTimeout(startFastAIAnalysis, 10000); // 10 saniyede bir analiz
+                setTimeout(startFastAIAnalysis, 15000); // 15 saniyede bir analiz (rate limit koruması)
             }
         }
 
@@ -5195,7 +5308,10 @@ try {
             };
             const elementId = aiTypeMap[aiType] || `${aiType}MaxTrades`;
             const maxTradesElement = document.getElementById(elementId);
-            const maxTrades = parseInt(maxTradesElement?.value || '5');
+            
+            // Default max trades based on AI type (Fast AI more conservative)
+            const defaultMaxTrades = aiType === 'Fast AI' ? 3 : 5;
+            const maxTrades = parseInt(maxTradesElement?.value || defaultMaxTrades);
             const activeTrades = transactions.filter(t => t.status === 'Aktif' && t.aiType === aiType).length;
             
             if (activeTrades >= maxTrades) {
@@ -5208,6 +5324,14 @@ try {
 
         function generateFastAITrade(analysisResults = null) {
             if (!fastAiActive) return;
+            
+            // Check trade opening cooldown (prevent rapid-fire trades)
+            const timeSinceLastTrade = Date.now() - lastTradeOpenTime;
+            if (timeSinceLastTrade < TRADE_OPEN_COOLDOWN) {
+                const waitTime = TRADE_OPEN_COOLDOWN - timeSinceLastTrade;
+                addApiLog(`⏳ İşlem cooldown - ${(waitTime/1000).toFixed(1)}s bekleniyor...`);
+                return;
+            }
             
             // Check maximum active trades limit for Fast AI
             if (!checkMaxActiveTrades('Fast AI')) return;
@@ -5301,6 +5425,11 @@ try {
             
             transactions.unshift(trade);
             fastTradeCount++;
+            
+            // Update last trade open time for cooldown protection
+            lastTradeOpenTime = Date.now();
+            addApiLog(`⏱️ İşlem cooldown başlatıldı (${TRADE_OPEN_COOLDOWN/1000}s)`);
+            
             saveTransactionsToStorage();
             updateActiveTradesTable();
             updateCompletedTradesTable();
@@ -5338,6 +5467,14 @@ try {
         function generateLongAITrade(analysisResults = null) {
             addLongAiLog(`🔧 generateLongAITrade called, longAiActive: ${longAiActive}`);
             if (!longAiActive) return;
+            
+            // Check trade opening cooldown (prevent rapid-fire trades)
+            const timeSinceLastTrade = Date.now() - lastTradeOpenTime;
+            if (timeSinceLastTrade < TRADE_OPEN_COOLDOWN) {
+                const waitTime = TRADE_OPEN_COOLDOWN - timeSinceLastTrade;
+                addLongAiLog(`⏳ İşlem cooldown - ${(waitTime/1000).toFixed(1)}s bekleniyor...`);
+                return;
+            }
             
             // Check maximum active trades limit for Long AI
             if (!checkMaxActiveTrades('Long AI')) {
@@ -5438,6 +5575,11 @@ try {
             
             transactions.unshift(trade);
             longTradeCount++;
+            
+            // Update last trade open time for cooldown protection
+            lastTradeOpenTime = Date.now();
+            addApiLog(`⏱️ İşlem cooldown başlatıldı (${TRADE_OPEN_COOLDOWN/1000}s)`);
+            
             saveTransactionsToStorage();
             updateActiveTradesTable();
             updateCompletedTradesTable();
@@ -7523,15 +7665,36 @@ try {
                     addApiLog(`✅ Bybit ana emir başarılı - ID: ${orderId}`);
                     trade.orderId = orderId;
                     
-                    // Send Stop Loss and Take Profit orders immediately
+                    // Send Stop Loss and Take Profit orders SEQUENTIALLY (not parallel)
                     if (document.getElementById('autoSlTp').checked) {
-                        setTimeout(() => sendBybitStopLoss(trade, apiKey, secretKey), 1000);
-                        setTimeout(() => sendBybitTakeProfit(trade, apiKey, secretKey), 2000);
-                    }
-                    
-                    // Send pre-calculated DCA orders if DCA is enabled
-                    if (trade.dcaEnabled && trade.dcaCount > 0) {
-                        setTimeout(() => sendPreCalculatedDCAOrders(trade, apiKey, secretKey), 3000);
+                        // Use async IIFE to ensure sequential execution
+                        (async () => {
+                            try {
+                                // Wait before sending SL
+                                await new Promise(resolve => setTimeout(resolve, 1500));
+                                addApiLog(`📤 TP/SL gönderimi başlıyor...`);
+                                
+                                // Send SL first and wait for completion
+                                await sendBybitStopLoss(trade, apiKey, secretKey);
+                                addApiLog(`✅ SL gönderildi, TP için bekleniyor...`);
+                                
+                                // Wait before sending TP
+                                await new Promise(resolve => setTimeout(resolve, 1500));
+                                
+                                // Send TP and wait for completion
+                                await sendBybitTakeProfit(trade, apiKey, secretKey);
+                                addApiLog(`✅ TP gönderildi, DCA için bekleniyor...`);
+                                
+                                // Send DCA orders if enabled
+                                if (trade.dcaEnabled && trade.dcaCount > 0) {
+                                    await new Promise(resolve => setTimeout(resolve, 1500));
+                                    await sendPreCalculatedDCAOrders(trade, apiKey, secretKey);
+                                    addApiLog(`✅ Tüm emirler sıralı olarak gönderildi`);
+                                }
+                            } catch (error) {
+                                addApiLog(`❌ Emir gönderim hatası: ${error.message}`);
+                            }
+                        })();
                     }
                     
                 } else {
@@ -9813,6 +9976,14 @@ try {
 
         // Manual Trade Function
         function openManualTrade() {
+            // Check trade opening cooldown (prevent rapid-fire trades)
+            const timeSinceLastTrade = Date.now() - lastTradeOpenTime;
+            if (timeSinceLastTrade < TRADE_OPEN_COOLDOWN) {
+                const waitTime = TRADE_OPEN_COOLDOWN - timeSinceLastTrade;
+                showNotification(`İşlem cooldown - ${(waitTime/1000).toFixed(1)}s bekleyin`, 'warning');
+                return;
+            }
+            
             const coin = prompt('Hangi coin için işlem açmak istiyorsunuz? (örn: BTC)');
             if (!coin) return;
             
@@ -9885,6 +10056,11 @@ try {
             };
             
             transactions.unshift(trade);
+            
+            // Update last trade open time for cooldown protection
+            lastTradeOpenTime = Date.now();
+            addApiLog(`⏱️ Manuel işlem cooldown başlatıldı (${TRADE_OPEN_COOLDOWN/1000}s)`);
+            
             saveTransactionsToStorage();
             updateActiveTradesTable();
             updateTradeInfo();
@@ -10665,6 +10841,41 @@ try {
 
         function restartSystem() {
             showNotification('Sistem yeniden başlatılıyor...', 'info');
+            
+            // Stop all intervals
+            if (priceUpdateInterval) {
+                clearInterval(priceUpdateInterval);
+                console.log('🔄 Price update interval cleared');
+            }
+            if (positionMonitoringInterval) {
+                clearInterval(positionMonitoringInterval);
+                console.log('🔄 Position monitoring interval cleared');
+            }
+            
+            // Restart all systems
+            setTimeout(() => {
+                // Restart price updates (includes checkActiveTradesForExit)
+                startPriceUpdates();
+                
+                // Restart position monitoring (includes DCA and exchange sync)
+                if (typeof startPositionMonitoring === 'function') {
+                    startPositionMonitoring();
+                }
+                
+                // Restart AI systems if they were active
+                if (fastAiActive) {
+                    console.log('🔄 Restarting Fast AI...');
+                }
+                if (longAiActive) {
+                    console.log('🔄 Restarting Long AI...');
+                }
+                if (probotAiActive) {
+                    console.log('🔄 Restarting ProBot AI...');
+                }
+                
+                showNotification('✅ Tüm sistemler yeniden başlatıldı!', 'success');
+                console.log('✅ System restart completed');
+            }, 500);
         }
 
         function backupData() {
